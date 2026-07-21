@@ -49,17 +49,30 @@ def main():
         uploaded_file = st.file_uploader("엑셀 파일 업로드 (.xlsx, .csv 형식 지원)", type=["xlsx", "csv"])
         
         if uploaded_file is not None:
-            # P/L 데이터 추출 가상 화면
-            st.write("업로드된 데이터 추출 결과 확인:")
-            df_mock = pd.DataFrame({
-                "품번 (Item Code)": ["CERAMIC-A1", "CERAMIC-B2"],
-                "수량 (EA)": [100, 200],
-                "면적 (CBM)": [1.5, 3.0]
-            })
-            st.data_editor(df_mock, use_container_width=True)
-            
-            if st.button("재고 데이터 확정 및 DB 저장", type="primary"):
-                st.success("데이터베이스에 성공적으로 저장되었습니다.")
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                else:
+                    df = pd.read_excel(uploaded_file, engine='openpyxl')
+                
+                st.subheader("👀 데이터 미리보기 및 수정")
+                st.markdown("셀을 **더블클릭**하여 내용을 직접 수정하거나, 체크박스를 선택해 **행을 삭제/추가**할 수 있습니다.")
+                
+                # st.data_editor로 편집 가능한 표 생성 (행 추가/삭제 기능 포함)
+                edited_df = st.data_editor(
+                    df,
+                    use_container_width=True,
+                    num_rows="dynamic",
+                    key="pl_data_editor"
+                )
+                
+                st.divider()
+                
+                if st.button("✅ 재고 데이터 확정 및 DB 저장", type="primary"):
+                    st.success(f"성공적으로 처리되었습니다! 총 {len(edited_df)}건의 데이터가 확정되었습니다. (DB 연동 대기 중)")
+                    
+            except Exception as e:
+                st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
 
     # --- 3. 재고 배분 (Admin) ---
     elif menu == "재고 배분":
@@ -72,7 +85,7 @@ def main():
         with col2:
             st.selectbox("2. 담당 가공사 지정", ["(주)제일가공", "대한세라믹", "우성산업"])
         with col3:
-            st.selectbox("3. 투입 현장 연결", ["울산 샤힌 프로젝트", "MGE 목업룸 현장"])
+            st.selectbox("3. 투입 현장 연결", ["울산 샤힌 프로젝트", "MGE 목업룸 현장", "기타 신규 현장"])
             
         st.number_input("배분 수량 (EA)", min_value=1, step=1)
         
@@ -102,7 +115,7 @@ def main():
         st.title("🏗️ 현장 투입 내역 등록")
         st.info("실제 현장에 시공이 완료된 최종 면적(m²)을 입력하여 전체 진도율에 반영합니다.")
         
-        st.selectbox("대상 시공 현장 선택", ["울산 샤힌 프로젝트", "MGE 목업룸 현장"])
+        st.selectbox("대상 시공 현장 선택", ["울산 샤힌 프로젝트", "MGE 목업룸 현장", "기타 신규 현장"])
         st.number_input("금일 시공 완료 면적 (m²)", min_value=0.0, step=0.1)
         
         if st.button("현장 투입 내역 반영", type="primary"):
