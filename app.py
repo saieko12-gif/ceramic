@@ -14,8 +14,9 @@ def main():
     st.sidebar.title("📌 시스템 메뉴")
     
     if "Admin" in user_role:
+        # Admin 메뉴에 '기준정보 관리' 추가됨
         menu = st.sidebar.radio("이동할 페이지를 선택해 주십시오.", 
-                                ["대시보드", "재고 입력", "재고 배분", "가공 및 시공 입력", "현장 투입 내역"])
+                                ["대시보드", "재고 입력", "재고 배분", "가공 및 시공 입력", "현장 투입 내역", "기준정보 관리"])
     else:
         menu = st.sidebar.radio("이동할 페이지를 선택해 주십시오.", 
                                 ["대시보드", "가공 및 시공 입력", "현장 투입 내역"])
@@ -47,7 +48,6 @@ def main():
         st.title("📥 재고 입력 (P/L 업로드)")
         st.info("수입된 P/L(Packing List) 엑셀 또는 PDF 파일을 업로드하여 원장 재고를 시스템에 등록합니다.")
         
-        # 엑셀, CSV, PDF 모두 지원하도록 수정됨
         uploaded_file = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 형식 지원)", type=["xlsx", "csv", "pdf"])
         
         if uploaded_file is not None:
@@ -65,17 +65,14 @@ def main():
                 # 3. PDF 파일 처리 (pdfplumber 활용)
                 elif uploaded_file.name.endswith('.pdf'):
                     with pdfplumber.open(uploaded_file) as pdf:
-                        # 첫 번째 페이지에서 표 추출
                         first_page = pdf.pages[0]
                         table = first_page.extract_table()
                         
                         if table:
-                            # 첫 번째 행을 컬럼명으로 지정
                             df = pd.DataFrame(table[1:], columns=table[0])
                         else:
                             st.error("업로드하신 PDF 파일에서 표(Table) 형식을 찾을 수 없습니다. 양식을 확인해 주십시오.")
 
-                # 데이터가 정상적으로 추출되었을 경우 미리보기 제공
                 if df is not None:
                     st.subheader("👀 데이터 미리보기 및 수정")
                     st.markdown("셀을 **더블클릭**하여 내용을 직접 수정하거나, 체크박스를 선택해 **행을 삭제/추가**할 수 있습니다.")
@@ -140,6 +137,52 @@ def main():
         
         if st.button("현장 투입 내역 반영", type="primary"):
             st.success("입력하신 시공 물량이 현장 진도율에 반영되었습니다.")
+
+    # --- 6. 기준정보 관리 (Admin 전용) ---
+    elif menu == "기준정보 관리":
+        st.title("⚙️ 기준정보 및 계정 관리 (마스터 데이터)")
+        st.info("신규 협력사 등록 및 로그인 계정(ID/PW) 발급, 그리고 신규 투입 현장을 관리하는 통합 페이지입니다.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("🏢 협력사 및 계정 발급 관리")
+            st.markdown("새로운 업체를 추가하고 시스템 접속용 ID와 초기 비밀번호를 부여하십시오.")
+            
+            df_contractors = pd.DataFrame({
+                "협력사명": ["(주)제일가공", "대한세라믹", "우성산업"],
+                "로그인 ID": ["jeil_01", "daehan_01", "woosung_01"],
+                "초기 비밀번호": ["1234", "1234", "1234"]
+            })
+            
+            edited_contractors = st.data_editor(
+                df_contractors, 
+                use_container_width=True, 
+                num_rows="dynamic", 
+                key="contractor_editor"
+            )
+            
+            if st.button("✅ 협력사 정보 및 계정 DB 저장", type="primary"):
+                st.success("협력사 마스터 데이터 및 접속 계정이 성공적으로 업데이트되었습니다.")
+                st.caption("※ 보안을 위해 발급된 초기 비밀번호는 각 협력사에 개별 안내해 주십시오.")
+
+        with col2:
+            st.subheader("🏗️ 투입 현장 관리")
+            st.markdown("신규 현장을 하단에 추가하거나, 완료된 현장을 삭제하여 관리하십시오.")
+            
+            df_sites = pd.DataFrame({
+                "현장명": ["울산 샤힌 프로젝트", "MGE 목업룸 현장"]
+            })
+            
+            edited_sites = st.data_editor(
+                df_sites, 
+                use_container_width=True, 
+                num_rows="dynamic", 
+                key="site_editor"
+            )
+            
+            if st.button("✅ 투입 현장 목록 DB 저장", type="primary"):
+                st.success("현장 마스터 데이터가 성공적으로 업데이트되었습니다.")
 
 if __name__ == "__main__":
     main()
