@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import pdfplumber
 
 # --- 기본 페이지 설정 ---
 st.set_page_config(page_title="자재 물류 및 프로젝트 관리 대시보드", layout="wide")
@@ -44,33 +45,53 @@ def main():
     # --- 2. 재고 입력 (P/L 업로드 - Admin) ---
     elif menu == "재고 입력":
         st.title("📥 재고 입력 (P/L 업로드)")
-        st.info("수입된 P/L(Packing List) 엑셀 파일을 업로드하여 원장 재고를 시스템에 등록합니다.")
+        st.info("수입된 P/L(Packing List) 엑셀 또는 PDF 파일을 업로드하여 원장 재고를 시스템에 등록합니다.")
         
-        uploaded_file = st.file_uploader("엑셀 파일 업로드 (.xlsx, .csv 형식 지원)", type=["xlsx", "csv"])
+        # 엑셀, CSV, PDF 모두 지원하도록 수정됨
+        uploaded_file = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 형식 지원)", type=["xlsx", "csv", "pdf"])
         
         if uploaded_file is not None:
             try:
+                df = None
+                
+                # 1. CSV 파일 처리
                 if uploaded_file.name.endswith('.csv'):
                     df = pd.read_csv(uploaded_file)
-                else:
-                    df = pd.read_excel(uploaded_file, engine='openpyxl')
-                
-                st.subheader("👀 데이터 미리보기 및 수정")
-                st.markdown("셀을 **더블클릭**하여 내용을 직접 수정하거나, 체크박스를 선택해 **행을 삭제/추가**할 수 있습니다.")
-                
-                # st.data_editor로 편집 가능한 표 생성 (행 추가/삭제 기능 포함)
-                edited_df = st.data_editor(
-                    df,
-                    use_container_width=True,
-                    num_rows="dynamic",
-                    key="pl_data_editor"
-                )
-                
-                st.divider()
-                
-                if st.button("✅ 재고 데이터 확정 및 DB 저장", type="primary"):
-                    st.success(f"성공적으로 처리되었습니다! 총 {len(edited_df)}건의 데이터가 확정되었습니다. (DB 연동 대기 중)")
                     
+                # 2. 엑셀 파일 처리
+                elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(uploaded_file, engine='openpyxl')
+                    
+                # 3. PDF 파일 처리 (pdfplumber 활용)
+                elif uploaded_file.name.endswith('.pdf'):
+                    with pdfplumber.open(uploaded_file) as pdf:
+                        # 첫 번째 페이지에서 표 추출
+                        first_page = pdf.pages[0]
+                        table = first_page.extract_table()
+                        
+                        if table:
+                            # 첫 번째 행을 컬럼명으로 지정
+                            df = pd.DataFrame(table[1:], columns=table[0])
+                        else:
+                            st.error("업로드하신 PDF 파일에서 표(Table) 형식을 찾을 수 없습니다. 양식을 확인해 주십시오.")
+
+                # 데이터가 정상적으로 추출되었을 경우 미리보기 제공
+                if df is not None:
+                    st.subheader("👀 데이터 미리보기 및 수정")
+                    st.markdown("셀을 **더블클릭**하여 내용을 직접 수정하거나, 체크박스를 선택해 **행을 삭제/추가**할 수 있습니다.")
+                    
+                    edited_df = st.data_editor(
+                        df,
+                        use_container_width=True,
+                        num_rows="dynamic",
+                        key="pl_data_editor"
+                    )
+                    
+                    st.divider()
+                    
+                    if st.button("✅ 재고 데이터 확정 및 DB 저장", type="primary"):
+                        st.success(f"성공적으로 처리되었습니다! 총 {len(edited_df)}건의 데이터가 확정되었습니다. (DB 연동 대기 중)")
+                        
             except Exception as e:
                 st.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
 
@@ -97,7 +118,6 @@ def main():
         st.title("🛠️ 가공 및 시공 내역 입력")
         st.info("당일 작업한 원장 수량과 가공 후 산출된 실제 면적(m²)을 정확히 입력해 주십시오.")
         
-        # 현재 보유 잔량 안내
         st.markdown("##### 현재 귀사에 할당된 원장 재고 잔량: **50 EA**")
         st.divider()
         
