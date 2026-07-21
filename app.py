@@ -11,7 +11,6 @@ st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
     
     div[data-testid="metric-container"] {
         background-color: #f8f9fa;
