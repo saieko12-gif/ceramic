@@ -46,7 +46,7 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (텍스트 패턴 추출 방식으로 무적 업그레이드) ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (이름 상관없이 다 잡는 무적 패턴 적용) ---
 def parse_florim_pdf(pdf_file):
     packing_no = ""
     dated_str = ""
@@ -57,7 +57,6 @@ def parse_florim_pdf(pdf_file):
             text = page.extract_text()
             if not text: continue
             
-            # 1. 상단 Packing N° 및 Dated 추출
             if not packing_no:
                 p_match = re.search(r'Packing\s*N[°o]?\s*:\s*(\d+)', text, re.IGNORECASE)
                 if p_match: packing_no = p_match.group(1)
@@ -65,31 +64,21 @@ def parse_florim_pdf(pdf_file):
                 d_match = re.search(r'Dated\s*:\s*([\d\.]+)', text, re.IGNORECASE)
                 if d_match: dated_str = d_match.group(1)
                 
-            # 2. 텍스트 라인별로 쪼개서 분석 (표 테두리가 없는 PDF 대응)
             lines = text.split('\n')
             for line in lines:
-                # M2가 있고, 원장명 키워드가 있는 줄만 타겟팅
-                if 'M2' in line and ('MARBLE' in line or 'HERI' in line or 'MATT' in line):
-                    
-                    # 패턴: [박스수량] 1 [헤베수량] M2
+                # 'M2'가 포함되어 있으면 일단 분석 시작 (특정 품명 제한 해제)
+                if 'M2' in line:
                     qty_match = re.search(r'\b(\d+)\s+1\s+([\d,]+)\s*M2', line)
-                    
                     if qty_match:
                         boxes = qty_match.group(1)
-                        # 콤마(,)를 소수점(.)으로 변경
                         m2_val = qty_match.group(2).replace(',', '.') 
                         
-                        # 품명 추출 (MARBLE, HERI, MATT 시작점부터 가져오기)
-                        desc_match = re.search(r'(MARBLE|HERI|MATT)', line)
-                        goods_desc = "품명 인식 불가"
+                        # 'M2' 이후의 텍스트에서 불필요한 정보(예: 1 Q50 5) 제거 후 품명 추출
+                        after_m2 = line[line.find('M2')+2:]
+                        desc = re.sub(r'^\s*\d+\s+[A-Z0-9]+\s*\d*\s*', '', after_m2)
+                        desc = re.sub(r'\b\d{6,}\b', '', desc).strip()
                         
-                        if desc_match:
-                            raw_desc = line[desc_match.start():]
-                            # 뒤에 붙은 품번/HS CODE (6자리 이상 연속된 숫자) 싹둑 자르기
-                            goods_desc = re.sub(r'\s*\b\d{6,}\b.*', '', raw_desc).strip()
-                        
-                        # 규격(mm) 추출 (예: 160X320 -> 1600 x 3200 mm)
-                        size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', goods_desc, re.IGNORECASE)
+                        size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', desc, re.IGNORECASE)
                         dimension_mm = "규격 정보 없음"
                         if size_match:
                             w_mm = int(size_match.group(1)) * 10
@@ -99,7 +88,7 @@ def parse_florim_pdf(pdf_file):
                         parsed_rows.append({
                             "Packing N°": packing_no,
                             "Dated": dated_str,
-                            "세라믹 원장명": goods_desc,
+                            "세라믹 원장명": desc,
                             "원장 수량(N Box)": int(boxes),
                             "총 헤베(m²)": m2_val,
                             "원장 규격(mm)": dimension_mm
@@ -164,36 +153,44 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 📥 재고 입력 (P/L 자동 파싱 적용)
+    # 메뉴 2: 📥 재고 입력 (P/L 자동 파싱 및 다중 파일 업로드 적용)
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 (P/L 업로드)")
-        st.info("수입된 P/L(Packing List) 엑셀 또는 PDF 파일을 업로드하여 원장 재고를 시스템에 자동 파싱합니다.")
+        st.info("수입된 P/L(Packing List)을 업로드하여 원장 재고를 시스템에 등록합니다. 다중 파일 업로드가 가능합니다.")
         
         entry_date = st.date_input("입고 일자 선택", datetime.date.today())
-        uploaded_file = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 지원)", type=["xlsx", "csv", "pdf"])
         
-        if uploaded_file is not None:
-            df = None
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-                df = pd.read_excel(uploaded_file, engine='openpyxl')
-            elif uploaded_file.name.endswith('.pdf'):
-                # FLORIM PDF 맞춤형 파싱 알고리즘 실행
-                df = parse_florim_pdf(uploaded_file)
+        # 다중 업로드 허용 (accept_multiple_files=True)
+        uploaded_files = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 지원)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
+        
+        if uploaded_files:
+            all_dfs = []
             
-            if df is not None:
-                st.subheader("👀 P/L 자동 인식 결과 미리보기 및 수정")
-                st.markdown("파싱된 Packing N°, Dated, 규격(mm) 데이터를 확인하고 필요시 셀을 **더블클릭**하여 직접 수정하십시오.")
+            for uploaded_file in uploaded_files:
+                df = None
+                if uploaded_file.name.endswith('.csv'):
+                    df = pd.read_csv(uploaded_file)
+                elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+                    df = pd.read_excel(uploaded_file, engine='openpyxl')
+                elif uploaded_file.name.endswith('.pdf'):
+                    df = parse_florim_pdf(uploaded_file)
                 
-                edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", key="pl_editor")
+                if df is not None:
+                    all_dfs.append(df)
+            
+            if all_dfs:
+                final_df = pd.concat(all_dfs, ignore_index=True)
+                st.subheader("👀 P/L 다중 자동 인식 결과 미리보기 및 수정")
+                st.markdown("파싱된 데이터를 확인하고 필요시 셀을 **더블클릭**하여 직접 수정하십시오.")
+                
+                edited_df = st.data_editor(final_df, use_container_width=True, num_rows="dynamic", key="pl_editor")
                 
                 st.divider()
-                if st.button("✅ 재고 데이터 확정 및 DB 저장", type="primary"):
+                if st.button("✅ 전체 재고 데이터 확정 및 DB 저장", type="primary"):
                     st.success(f"{entry_date} 일자로 총 {len(edited_df)}건의 원장 재고 데이터가 성공적으로 확정되었습니다.")
             else:
-                st.error("파일에서 P/L 표 데이터를 인식하지 못했습니다. 표준 FLORIM P/L 양식인지 확인해 주십시오.")
+                st.error("업로드하신 파일들에서 P/L 표 데이터를 인식하지 못했습니다. 표준 FLORIM P/L 양식인지 확인해 주십시오.")
 
     # ==========================================
     # 메뉴 3: 🔄 재고 배분
@@ -209,7 +206,7 @@ def main():
         
         col1, col2, col3, col4 = st.columns(4)
         with col1: pack_no = st.text_input("Packing N° (선택)", "3110068246")
-        with col2: selected_item = st.selectbox("대상 재고 선택", ["MARBLE HERI TUNDRA MATT", "MARBLE HERI MOUNTPEAK MAT"])
+        with col2: selected_item = st.selectbox("대상 재고 선택", ["MARBLE HERI TUNDRA MATT", "NATURE MOOD GLACIER COMF", "MARBLE HERI MOUNTPEAK MAT"])
         with col3: selected_contractor = st.selectbox("담당 가공사 지정", contractor_list)
         with col4: selected_site = st.selectbox("투입 현장 연결", site_list)
         
@@ -238,7 +235,7 @@ def main():
         proc_date = st.date_input("작업 일자 선택", datetime.date.today())
         
         col1, col2, col3 = st.columns(3)
-        with col1: proc_item = st.selectbox("가공 품목 선택", ["MARBLE HERI TUNDRA MATT (1600x3200mm)", "MARBLE HERI MOUNTPEAK MAT (1600x3200mm)"])
+        with col1: proc_item = st.selectbox("가공 품목 선택", ["MARBLE HERI TUNDRA MATT (1600x3200mm)", "NATURE MOOD GLACIER COMF (1200x2400mm)"])
         with col2: input_ea = st.number_input("투입 원장 수량 (EA)", min_value=0, step=1)
         with col3: input_m2 = st.number_input("산출 면적 (m²)", min_value=0.0, step=0.1)
             
@@ -269,7 +266,7 @@ def main():
         
         col1, col2, col3 = st.columns(3)
         with col1: site_sel = st.selectbox("1. 시공 현장", st.session_state.sites_df["현장명"].tolist())
-        with col2: item_sel = st.selectbox("2. 투입 원장 종류", ["MARBLE HERI TUNDRA MATT", "MARBLE HERI MOUNTPEAK MAT", "기타 건자재"])
+        with col2: item_sel = st.selectbox("2. 투입 원장 종류", ["MARBLE HERI TUNDRA MATT", "NATURE MOOD GLACIER COMF", "기타 건자재"])
         with col3: area_sel = st.number_input("3. 시공 완료 면적 (m²)", min_value=0.0, step=0.1)
         
         if st.button("투입 내역 추가", type="primary"):
