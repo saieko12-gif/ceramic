@@ -46,7 +46,7 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (슈퍼 무적 로직) ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (절대 실패 안 하는 무적 로직) ---
 def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
@@ -57,36 +57,41 @@ def parse_florim_pdf(pdf_file, filename=""):
             text = page.extract_text()
             if not text: continue
             
-            # 상단 Packing N° 및 Dated 추출
+            # 상단 Packing N° 및 Dated 추출 (기호 상관없이 숫자만 무조건 캐치)
             if not packing_no:
-                p_match = re.search(r'Packing\s*N[°o]?\s*[:|]\s*(\d+)', text, re.IGNORECASE)
+                p_match = re.search(r'Packing\s*N[^\d]*(\d+)', text, re.IGNORECASE)
                 if p_match: packing_no = p_match.group(1)
             if not dated_str:
-                d_match = re.search(r'Dated\s*[:|]\s*([\d\.]+)', text, re.IGNORECASE)
+                d_match = re.search(r'Dated[^\d]*([\d\.]+)', text, re.IGNORECASE)
                 if d_match: dated_str = d_match.group(1)
                 
-            # 텍스트 평탄화 (줄바꿈 및 | 기호를 공백으로 변환)
-            clean_text = re.sub(r'[\n|]', ' ', text)
+            # 텍스트 평탄화 (줄바꿈 및 각종 특수기호를 공백으로 변환하여 한 줄로 쫙 폄)
+            clean_text = re.sub(r'[\r\n|]', ' ', text)
             clean_text = re.sub(r'\s+', ' ', clean_text)
             
-            # M2와 수량을 찾는 1차 정규식 (어떤 찌꺼기가 껴있어도 숫자 M2 패턴만 찾음)
-            pattern_m2 = r'\b(\d+)\s+1\s+([\d,]+)\s*M2'
+            # [1단계] M2와 그 앞의 박스 수량을 무조건 찾는 정규식
+            # 1이 생략되거나 소문자 l, 대문자 I로 인식된 경우도 모두 방어함
+            pattern_m2 = r'\b(\d+)\s+[1lI]?\s*([\d,\.]+)\s*M2'
             
-            for match in re.finditer(pattern_m2, clean_text):
+            for match in re.finditer(pattern_m2, clean_text, re.IGNORECASE):
                 boxes = match.group(1)
                 m2_val = match.group(2).replace(',', '.')
                 
-                # M2 위치 이후의 텍스트를 넉넉하게 150자 정도 잘라냄
+                # [2단계] M2 위치 이후의 텍스트를 넉넉하게 150자 정도 잘라냄
                 start_idx = match.end()
-                search_area = clean_text[start_idx:start_idx+150]
+                search_area = clean_text[start_idx : start_idx + 150]
                 
-                # 영문자 4개 이상 연속되는 단어(MARBLE, NATURE 등)부터 6자리 이상 숫자 전까지 싹 긁어옴
-                desc_match = re.search(r'([A-Za-z]{4,}.*?)(?=\s*\d{6,})', search_area)
-                
-                desc = desc_match.group(1).strip() if desc_match else "품명 인식 불가"
+                # [3단계] 품명 추출 로직: 3글자 이상 영단어 시작점부터 5자리 이상 숫자(HS CODE 등) 앞까지만 긁어옴
+                start_word = re.search(r'[A-Za-z]{3,}', search_area)
+                if start_word:
+                    desc_candidate = search_area[start_word.start():]
+                    # 5자리 이상 연속된 숫자가 나오면 그 앞에서 싹둑 자름
+                    desc = re.split(r'\s*\b\d{5,}\b', desc_candidate)[0].strip()
+                else:
+                    desc = "품명 인식 불가"
                 
                 # 규격(mm) 추출
-                size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', desc, re.IGNORECASE)
+                size_match = re.search(r'(\d+)\s*[Xx]\s*(\d+)', desc, re.IGNORECASE)
                 dimension_mm = "규격 정보 없음"
                 if size_match:
                     w_mm = int(size_match.group(1)) * 10
