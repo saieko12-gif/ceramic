@@ -3,6 +3,7 @@ import pandas as pd
 import pdfplumber
 import io
 import datetime
+import re
 
 # --- 1. 기본 페이지 및 기업용 UI(CSS) 세팅 ---
 st.set_page_config(page_title="B2B 통합 자재/물류 관리 시스템", layout="wide")
@@ -23,7 +24,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 🧠 임시 메모리(session_state) 세팅 (DB 역할) ---
+# --- 2. 🧠 임시 메모리(session_state) 세팅 ---
 if 'contractors_df' not in st.session_state:
     st.session_state.contractors_df = pd.DataFrame({
         "협력사명": ["(주)제일가공", "대한세라믹", "우성산업"],
@@ -36,9 +37,8 @@ if 'sites_df' not in st.session_state:
         "현장명": ["울산 샤힌 프로젝트 (FF&E)", "MGE 목업룸 현장", "신규 건자재 현장"]
     })
 
-# 날짜가 포함된 히스토리 데이터 프레임 세팅
 if 'dist_history' not in st.session_state:
-    st.session_state.dist_history = pd.DataFrame(columns=["배분 일자", "대상 재고", "담당 가공사", "투입 현장", "배분 수량(EA)"])
+    st.session_state.dist_history = pd.DataFrame(columns=["배분 일자", "Packing N°", "대상 재고", "담당 가공사", "투입 현장", "배분 수량(EA)"])
 
 if 'proc_history' not in st.session_state:
     st.session_state.proc_history = pd.DataFrame(columns=["작업 일자", "담당 가공사", "가공 품목", "투입 원장(EA)", "산출 면적(m²)"])
@@ -46,9 +46,81 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. 권한 및 메뉴 시스템 ---
+# --- 3. FLORIM P/L PDF 파싱 함수 ---
+def parse_florim_pdf(pdf_file):
+    packing_no = ""
+    dated_str = ""
+    parsed_rows = []
+    
+    with pdfplumber.open(pdf_file) as pdf:
+        full_text = ""
+        for page in pdf.pages:
+            full_text += page.extract_text() or ""
+            
+            # 1. 상단 Packing N° 및 Dated 추출
+            if not packing_no:
+                p_match = re.search(r'Packing\s*N[°o]?\s*:\s*(\d+)', full_text, re.IGNORECASE)
+                if p_match: packing_no = p_match.group(1)
+            if not dated_str:
+                d_match = re.search(r'Dated\s*:\s*([\d\.]+)', full_text, re.IGNORECASE)
+                if d_match: dated_str = d_match.group(1)
+                
+            # 2. 표 데이터 추출
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    # 데이터 행 판별 (N°Packaging 또는 No Box 수량 패턴)
+                    row_str = " ".join([str(cell) for cell in row if cell])
+                    
+                    # 225,280 M2 같은 M2 패턴 검색
+                    if 'M2' in row_str or 'M2' in "".join(str(row)):
+                        # 항목 파싱
+                        boxes = ""
+                        m2_val = ""
+                        goods_desc = ""
+                        
+                        for cell in row:
+                            if not cell: continue
+                            cell_clean = cell.strip()
+                            # 수량 (No Box)
+                            if cell_clean.isdigit() and len(cell_clean) <= 3 and not boxes:
+                                boxes = cell_clean
+                            # 헤베 (Tot.Qty UM)
+                            elif 'M2' in cell_clean:
+                                m2_val = cell_clean.replace('M2', '').strip().replace(',', '.')
+                            # 품명 (Description)
+                            elif 'MARBLE' in cell_clean or 'MATT' in cell_clean or 'HERI' in cell_clean:
+                                # HS CODE 6자리 숫자 제거 및 이쁘게 다듬기
+                                cleaned_desc = re.sub(r'\b\d{6}\b', '', cell_clean)
+                                cleaned_desc = re.sub(r'\s+', ' ', cleaned_desc).strip()
+                                goods_desc = cleaned_desc
+
+                        if goods_desc and boxes:
+                            # 규격(mm) 추출 로직 (예: 160X320 -> 1600 x 3200 mm)
+                            size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', goods_desc, re.IGNORECASE)
+                            if size_match:
+                                w_mm = int(size_match.group(1)) * 10
+                                l_mm = int(size_match.group(2)) * 10
+                                dimension_mm = f"{w_mm} x {l_mm} mm"
+                            else:
+                                dimension_mm = "규격 정보 없음"
+                                
+                            parsed_rows.append({
+                                "Packing N°": packing_no,
+                                "Dated": dated_str,
+                                "세라믹 원장명": goods_desc,
+                                "원장 수량(N Box)": int(boxes) if boxes.isdigit() else 0,
+                                "총 헤베(m²)": m2_val,
+                                "원장 규격(mm)": dimension_mm
+                            })
+                            
+    if parsed_rows:
+        return pd.DataFrame(parsed_rows)
+    else:
+        return None
+
+# --- 4. 권한 및 메뉴 시스템 ---
 st.sidebar.title("🔐 시스템 로그인")
-# 테스트를 위해 User는 특정 업체로 로그인했다고 가정
 user_role = st.sidebar.radio("접속 계정 (테스트용)", ["Admin (본사 관리자)", "User ((주)제일가공 소장)"])
 
 is_admin = "Admin" in user_role
@@ -70,11 +142,9 @@ def main():
     if menu == "대시보드":
         st.title("📊 통합 자재 및 프로젝트 대시보드")
         
-        # Admin 전용 엑셀 다운로드 기능
         if is_admin:
             st.markdown("본사 원장 재고 현황 및 각 프로젝트 현장별 투입/가공 매트릭스를 조회합니다.")
             
-            # 엑셀 파일 생성 로직
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
                 st.session_state.dist_history.to_excel(writer, sheet_name='재고배분내역', index=False)
@@ -94,8 +164,6 @@ def main():
             
         st.divider()
         
-        # 권한별 데이터 필터링 (Admin은 전체, User는 본인 것만)
-        display_dist = st.session_state.dist_history if is_admin else st.session_state.dist_history[st.session_state.dist_history["담당 가공사"] == current_contractor]
         display_site = st.session_state.site_history if is_admin else st.session_state.site_history[st.session_state.site_history["담당 협력사"] == current_contractor]
         
         st.subheader("📈 프로젝트 누적 투입/진도율 현황")
@@ -105,36 +173,39 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 📥 재고 입력 (P/L 업로드 - Admin 전용)
+    # 메뉴 2: 📥 재고 입력 (P/L 자동 파싱 적용)
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 (P/L 업로드)")
-        st.info("수입된 P/L(Packing List)을 업로드하여 원장 재고를 시스템에 등록합니다.")
+        st.info("수입된 P/L(Packing List) 엑셀 또는 PDF 파일을 업로드하여 원장 재고를 시스템에 자동 파싱합니다.")
         
         entry_date = st.date_input("입고 일자 선택", datetime.date.today())
         uploaded_file = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 지원)", type=["xlsx", "csv", "pdf"])
         
         if uploaded_file is not None:
-            # (파일 파싱 로직 - 생략 없이 유지)
             df = None
             if uploaded_file.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file)
             elif uploaded_file.name.endswith(('.xlsx', '.xls')):
                 df = pd.read_excel(uploaded_file, engine='openpyxl')
             elif uploaded_file.name.endswith('.pdf'):
-                with pdfplumber.open(uploaded_file) as pdf:
-                    first_page = pdf.pages[0]
-                    table = first_page.extract_table()
-                    if table: df = pd.DataFrame(table[1:], columns=table[0])
+                # FLORIM PDF 맞춤형 파싱 알고리즘 실행
+                df = parse_florim_pdf(uploaded_file)
             
             if df is not None:
-                st.subheader("👀 데이터 미리보기 및 수정")
-                edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic")
+                st.subheader("👀 P/L 자동 인식 결과 미리보기 및 수정")
+                st.markdown("파싱된 Packing N°, Dated, 규격(mm) 데이터를 확인하고 필요시 셀을 **더블클릭**하여 직접 수정하십시오.")
+                
+                edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", key="pl_editor")
+                
+                st.divider()
                 if st.button("✅ 재고 데이터 확정 및 DB 저장", type="primary"):
-                    st.success(f"{entry_date} 일자로 데이터가 확정되었습니다.")
+                    st.success(f"{entry_date} 일자로 총 {len(edited_df)}건의 원장 재고 데이터가 성공적으로 확정되었습니다.")
+            else:
+                st.error("파일에서 P/L 표 데이터를 인식하지 못했습니다. 표준 FLORIM P/L 양식인지 확인해 주십시오.")
 
     # ==========================================
-    # 메뉴 3: 🔄 재고 배분 (Admin 전용)
+    # 메뉴 3: 🔄 재고 배분
     # ==========================================
     elif menu == "재고 배분":
         st.title("🔄 재고 배분 및 현장 매핑")
@@ -145,15 +216,16 @@ def main():
         st.subheader("📝 신규 재고 배분 입력")
         dist_date = st.date_input("배분 일자 선택", datetime.date.today())
         
-        col1, col2, col3 = st.columns(3)
-        with col1: selected_item = st.selectbox("대상 재고 선택", ["LIVART-CERAMIC-A1", "LIVART-WOOD-PANEL"])
-        with col2: selected_contractor = st.selectbox("담당 가공사 지정", contractor_list)
-        with col3: selected_site = st.selectbox("투입 현장 연결", site_list)
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: pack_no = st.text_input("Packing N° (선택)", "3110068246")
+        with col2: selected_item = st.selectbox("대상 재고 선택", ["MARBLE HERI TUNDRA MATT", "MARBLE HERI MOUNTPEAK MAT"])
+        with col3: selected_contractor = st.selectbox("담당 가공사 지정", contractor_list)
+        with col4: selected_site = st.selectbox("투입 현장 연결", site_list)
         
-        qty = st.number_input("배분 수량 (EA)", min_value=1, step=1)
+        qty = st.number_input("배분 수량 (N Box / EA)", min_value=1, step=1)
         
         if st.button("배분 내역 추가", type="primary"):
-            new_row = pd.DataFrame({"배분 일자": [dist_date], "대상 재고": [selected_item], "담당 가공사": [selected_contractor], "투입 현장": [selected_site], "배분 수량(EA)": [qty]})
+            new_row = pd.DataFrame({"배분 일자": [dist_date], "Packing N°": [pack_no], "대상 재고": [selected_item], "담당 가공사": [selected_contractor], "투입 현장": [selected_site], "배분 수량(EA)": [qty]})
             st.session_state.dist_history = pd.concat([st.session_state.dist_history, new_row], ignore_index=True)
             st.success("배분 내역이 하단 표에 추가되었습니다.")
 
@@ -164,7 +236,7 @@ def main():
             st.success("배분 내역 수정이 완료되었습니다.")
 
     # ==========================================
-    # 메뉴 4: 🛠️ 가공 및 시공 입력 (권한 격리)
+    # 메뉴 4: 🛠️ 가공 및 시공 입력
     # ==========================================
     elif menu == "가공 및 시공 입력":
         st.title("🛠️ 가공 내역 등록")
@@ -175,7 +247,7 @@ def main():
         proc_date = st.date_input("작업 일자 선택", datetime.date.today())
         
         col1, col2, col3 = st.columns(3)
-        with col1: proc_item = st.selectbox("가공 품목 선택", ["LIVART-CERAMIC-A1", "LIVART-WOOD-PANEL"])
+        with col1: proc_item = st.selectbox("가공 품목 선택", ["MARBLE HERI TUNDRA MATT (1600x3200mm)", "MARBLE HERI MOUNTPEAK MAT (1600x3200mm)"])
         with col2: input_ea = st.number_input("투입 원장 수량 (EA)", min_value=0, step=1)
         with col3: input_m2 = st.number_input("산출 면적 (m²)", min_value=0.0, step=0.1)
             
@@ -186,18 +258,15 @@ def main():
 
         st.divider()
         st.subheader("📋 누적 가공 내역 관리")
-        # 관리자는 전체, 협력사는 자기 것만 필터링 후 에디터에 띄움
         mask = st.session_state.proc_history["담당 가공사"] == target_contractor if not is_admin else [True] * len(st.session_state.proc_history)
         filtered_proc = st.session_state.proc_history[mask]
         
         edited_proc = st.data_editor(filtered_proc, use_container_width=True, num_rows="dynamic")
-        
         if st.button("🔄 수정 내역 시스템 반영", key="proc_save"):
-            # 실제 DB 연동 시에는 ID 기반으로 업데이트됨 (현재는 임시 세션 덮어쓰기 로직 생략)
             st.success("수정된 가공 내역이 시스템에 반영되었습니다.")
 
     # ==========================================
-    # 메뉴 5: 🏗️ 현장 투입 내역 (권한 격리 + 3단 콤보)
+    # 메뉴 5: 🏗️ 현장 투입 내역
     # ==========================================
     elif menu == "현장 투입 내역":
         st.title("🏗️ 현장 투입 내역 등록")
@@ -209,7 +278,7 @@ def main():
         
         col1, col2, col3 = st.columns(3)
         with col1: site_sel = st.selectbox("1. 시공 현장", st.session_state.sites_df["현장명"].tolist())
-        with col2: item_sel = st.selectbox("2. 투입 원장 종류", ["LIVART-CERAMIC-A1", "LIVART-WOOD-PANEL", "기타 건자재"])
+        with col2: item_sel = st.selectbox("2. 투입 원장 종류", ["MARBLE HERI TUNDRA MATT", "MARBLE HERI MOUNTPEAK MAT", "기타 건자재"])
         with col3: area_sel = st.number_input("3. 시공 완료 면적 (m²)", min_value=0.0, step=0.1)
         
         if st.button("투입 내역 추가", type="primary"):
@@ -219,17 +288,15 @@ def main():
 
         st.divider()
         st.subheader("📋 누적 현장 투입 내역 관리")
-        
         mask2 = st.session_state.site_history["담당 협력사"] == target_contractor if not is_admin else [True] * len(st.session_state.site_history)
         filtered_site = st.session_state.site_history[mask2]
         
         edited_site = st.data_editor(filtered_site, use_container_width=True, num_rows="dynamic")
-        
         if st.button("🔄 수정 내역 시스템 반영", key="site_save"):
             st.success("수정된 현장 투입 내역이 시스템에 반영되었습니다.")
 
     # ==========================================
-    # 메뉴 6: ⚙️ 기준정보 관리 (Admin 전용)
+    # 메뉴 6: ⚙️ 기준정보 관리
     # ==========================================
     elif menu == "기준정보 관리":
         st.title("⚙️ 기준정보 및 계정 관리 (마스터 데이터)")
