@@ -46,7 +46,7 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (줄바꿈 무시 완전체 로직) ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (슈퍼 무적 로직) ---
 def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
@@ -65,19 +65,27 @@ def parse_florim_pdf(pdf_file, filename=""):
                 d_match = re.search(r'Dated\s*[:|]\s*([\d\.]+)', text, re.IGNORECASE)
                 if d_match: dated_str = d_match.group(1)
                 
-            # 핵심: 모든 줄바꿈과 막대기를 공백으로 치환해서 거대한 한 줄 텍스트로 만듦
+            # 텍스트 평탄화 (줄바꿈 및 | 기호를 공백으로 변환)
             clean_text = re.sub(r'[\n|]', ' ', text)
             clean_text = re.sub(r'\s+', ' ', clean_text)
             
-            # 정규식으로 전체 텍스트에서 패턴 찾기 (다중 매칭)
-            pattern = r'\b(\d+)\s+1\s+([\d,]+)\s*M2\s+(?:.*?)\s+((?:MARBLE|NATURE).*?)(?=\s+\d{6,})'
+            # M2와 수량을 찾는 1차 정규식 (어떤 찌꺼기가 껴있어도 숫자 M2 패턴만 찾음)
+            pattern_m2 = r'\b(\d+)\s+1\s+([\d,]+)\s*M2'
             
-            for match in re.finditer(pattern, clean_text):
+            for match in re.finditer(pattern_m2, clean_text):
                 boxes = match.group(1)
                 m2_val = match.group(2).replace(',', '.')
-                desc = match.group(3).strip()
                 
-                # 규격 추출
+                # M2 위치 이후의 텍스트를 넉넉하게 150자 정도 잘라냄
+                start_idx = match.end()
+                search_area = clean_text[start_idx:start_idx+150]
+                
+                # 영문자 4개 이상 연속되는 단어(MARBLE, NATURE 등)부터 6자리 이상 숫자 전까지 싹 긁어옴
+                desc_match = re.search(r'([A-Za-z]{4,}.*?)(?=\s*\d{6,})', search_area)
+                
+                desc = desc_match.group(1).strip() if desc_match else "품명 인식 불가"
+                
+                # 규격(mm) 추출
                 size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', desc, re.IGNORECASE)
                 dimension_mm = "규격 정보 없음"
                 if size_match:
@@ -154,7 +162,7 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 📥 재고 입력 
+    # 메뉴 2: 📥 재고 입력
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 (P/L 업로드)")
