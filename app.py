@@ -46,8 +46,8 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (이름 상관없이 다 잡는 무적 패턴 적용) ---
-def parse_florim_pdf(pdf_file):
+# --- 3. FLORIM P/L PDF 파싱 함수 (특수문자 무시 슈퍼 패턴 적용) ---
+def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
     parsed_rows = []
@@ -57,24 +57,29 @@ def parse_florim_pdf(pdf_file):
             text = page.extract_text()
             if not text: continue
             
+            # 상단 Packing N° 및 Dated 추출
             if not packing_no:
-                p_match = re.search(r'Packing\s*N[°o]?\s*:\s*(\d+)', text, re.IGNORECASE)
+                p_match = re.search(r'Packing\s*N[°o]?\s*[:|]\s*(\d+)', text, re.IGNORECASE)
                 if p_match: packing_no = p_match.group(1)
             if not dated_str:
-                d_match = re.search(r'Dated\s*:\s*([\d\.]+)', text, re.IGNORECASE)
+                d_match = re.search(r'Dated\s*[:|]\s*([\d\.]+)', text, re.IGNORECASE)
                 if d_match: dated_str = d_match.group(1)
                 
             lines = text.split('\n')
             for line in lines:
-                # 'M2'가 포함되어 있으면 일단 분석 시작 (특정 품명 제한 해제)
-                if 'M2' in line:
-                    qty_match = re.search(r'\b(\d+)\s+1\s+([\d,]+)\s*M2', line)
+                # 텍스트에 섞인 막대기(|) 같은 불순물을 공백으로 싹 치환해뿌기
+                clean_line = line.replace('|', ' ')
+                
+                # 'M2'가 포함되어 있으면 분석 시작
+                if 'M2' in clean_line:
+                    qty_match = re.search(r'\b(\d+)\s+1\s+([\d,]+)\s*M2', clean_line)
+                    
                     if qty_match:
                         boxes = qty_match.group(1)
                         m2_val = qty_match.group(2).replace(',', '.') 
                         
                         # 'M2' 이후의 텍스트에서 불필요한 정보(예: 1 Q50 5) 제거 후 품명 추출
-                        after_m2 = line[line.find('M2')+2:]
+                        after_m2 = clean_line[clean_line.find('M2')+2:]
                         desc = re.sub(r'^\s*\d+\s+[A-Z0-9]+\s*\d*\s*', '', after_m2)
                         desc = re.sub(r'\b\d{6,}\b', '', desc).strip()
                         
@@ -86,6 +91,7 @@ def parse_florim_pdf(pdf_file):
                             dimension_mm = f"{w_mm} x {l_mm} mm"
                             
                         parsed_rows.append({
+                            "업로드 파일명": filename,
                             "Packing N°": packing_no,
                             "Dated": dated_str,
                             "세라믹 원장명": desc,
@@ -161,7 +167,7 @@ def main():
         
         entry_date = st.date_input("입고 일자 선택", datetime.date.today())
         
-        # 다중 업로드 허용 (accept_multiple_files=True)
+        # 다중 업로드 허용
         uploaded_files = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 지원)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
         
         if uploaded_files:
@@ -174,7 +180,8 @@ def main():
                 elif uploaded_file.name.endswith(('.xlsx', '.xls')):
                     df = pd.read_excel(uploaded_file, engine='openpyxl')
                 elif uploaded_file.name.endswith('.pdf'):
-                    df = parse_florim_pdf(uploaded_file)
+                    # 파일명까지 같이 넘기게 함수 수정
+                    df = parse_florim_pdf(uploaded_file, uploaded_file.name)
                 
                 if df is not None:
                     all_dfs.append(df)
