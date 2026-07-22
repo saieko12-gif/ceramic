@@ -24,7 +24,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 🧠 임시 메모리(session_state) 세팅 ---
+# --- 2. 임시 메모리(session_state) 세팅 ---
 if 'contractors_df' not in st.session_state:
     st.session_state.contractors_df = pd.DataFrame({
         "협력사명": ["(주)제일가공", "대한세라믹", "우성산업"],
@@ -179,19 +179,18 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 📥 재고 입력 (깔끔한 엑셀 변환기 적용)
+    # 메뉴 2: 📥 재고 입력 (UI 깔끔하게 개선)
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 및 P/L 업로드")
         
-        # --- PDF to Excel 강제 변환기 (무적 파싱 로직 적용) ---
-        with st.expander("🛠️ [보조 도구] 인식이 잘 안되는 꼬인 PDF 깔끔하게 엑셀로 추출하기", expanded=True):
-            st.info("특이한 양식의 PDF는 여기서 엑셀로 추출하십시오. 쓰레기 데이터를 걸러내고 완벽하게 정제된 표만 엑셀로 만들어 줍니다.")
-            raw_pdf = st.file_uploader("변환할 PDF 파일 하나를 올려보소", type=["pdf"], key="raw_pdf")
+        # --- PDF to Excel 보조 도구 (접어두기 기본 설정 적용) ---
+        with st.expander("🛠️ [보조 도구] PDF 파일 자동 인식 실패 시 엑셀 변환기", expanded=False):
+            st.info("PDF 원본 파일이 자동 인식되지 않는 경우, 본 도구를 이용해 엑셀 파일로 변환한 후 메인 업로더에 첨부해 주십시오.")
+            raw_pdf = st.file_uploader("변환할 PDF 파일을 선택해 주십시오.", type=["pdf"], key="raw_pdf")
             if raw_pdf:
-                if st.button("🔄 엑셀로 깔끔하게 추출하기"):
-                    with st.spinner("불필요한 데이터 제거 및 엑셀 변환 중입니다..."):
-                        # 무식하게 쌩 텍스트를 뽑는 게 아니라 정제 로직을 태워서 엑셀로 뱉어냄
+                if st.button("🔄 엑셀로 추출하기"):
+                    with st.spinner("데이터 정제 및 엑셀 변환 중입니다..."):
                         df_clean = parse_florim_pdf(raw_pdf, raw_pdf.name)
                         
                         if df_clean is not None and not df_clean.empty:
@@ -201,14 +200,14 @@ def main():
                             raw_excel_data = output_raw.getvalue()
                             
                             st.download_button(
-                                label=f"📥 [{raw_pdf.name}] 깔끔한 엑셀로 다운로드",
+                                label=f"📥 [{raw_pdf.name}] 엑셀로 다운로드",
                                 data=raw_excel_data,
                                 file_name=f"정제됨_{raw_pdf.name}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 type="primary"
                             )
                         else:
-                            st.error("데이터를 추출할 수 없습니다. 양식을 확인해주세요.")
+                            st.error("데이터를 추출할 수 없습니다. 파일 양식을 확인해 주십시오.")
         
         st.divider()
         
