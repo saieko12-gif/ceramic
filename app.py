@@ -46,74 +46,65 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (텍스트 패턴 추출 방식으로 무적 업그레이드) ---
 def parse_florim_pdf(pdf_file):
     packing_no = ""
     dated_str = ""
     parsed_rows = []
     
     with pdfplumber.open(pdf_file) as pdf:
-        full_text = ""
         for page in pdf.pages:
-            full_text += page.extract_text() or ""
+            text = page.extract_text()
+            if not text: continue
             
             # 1. 상단 Packing N° 및 Dated 추출
             if not packing_no:
-                p_match = re.search(r'Packing\s*N[°o]?\s*:\s*(\d+)', full_text, re.IGNORECASE)
+                p_match = re.search(r'Packing\s*N[°o]?\s*:\s*(\d+)', text, re.IGNORECASE)
                 if p_match: packing_no = p_match.group(1)
             if not dated_str:
-                d_match = re.search(r'Dated\s*:\s*([\d\.]+)', full_text, re.IGNORECASE)
+                d_match = re.search(r'Dated\s*:\s*([\d\.]+)', text, re.IGNORECASE)
                 if d_match: dated_str = d_match.group(1)
                 
-            # 2. 표 데이터 추출
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    # 데이터 행 판별 (N°Packaging 또는 No Box 수량 패턴)
-                    row_str = " ".join([str(cell) for cell in row if cell])
+            # 2. 텍스트 라인별로 쪼개서 분석 (표 테두리가 없는 PDF 대응)
+            lines = text.split('\n')
+            for line in lines:
+                # M2가 있고, 원장명 키워드가 있는 줄만 타겟팅
+                if 'M2' in line and ('MARBLE' in line or 'HERI' in line or 'MATT' in line):
                     
-                    # 225,280 M2 같은 M2 패턴 검색
-                    if 'M2' in row_str or 'M2' in "".join(str(row)):
-                        # 항목 파싱
-                        boxes = ""
-                        m2_val = ""
-                        goods_desc = ""
+                    # 패턴: [박스수량] 1 [헤베수량] M2
+                    qty_match = re.search(r'\b(\d+)\s+1\s+([\d,]+)\s*M2', line)
+                    
+                    if qty_match:
+                        boxes = qty_match.group(1)
+                        # 콤마(,)를 소수점(.)으로 변경
+                        m2_val = qty_match.group(2).replace(',', '.') 
                         
-                        for cell in row:
-                            if not cell: continue
-                            cell_clean = cell.strip()
-                            # 수량 (No Box)
-                            if cell_clean.isdigit() and len(cell_clean) <= 3 and not boxes:
-                                boxes = cell_clean
-                            # 헤베 (Tot.Qty UM)
-                            elif 'M2' in cell_clean:
-                                m2_val = cell_clean.replace('M2', '').strip().replace(',', '.')
-                            # 품명 (Description)
-                            elif 'MARBLE' in cell_clean or 'MATT' in cell_clean or 'HERI' in cell_clean:
-                                # HS CODE 6자리 숫자 제거 및 이쁘게 다듬기
-                                cleaned_desc = re.sub(r'\b\d{6}\b', '', cell_clean)
-                                cleaned_desc = re.sub(r'\s+', ' ', cleaned_desc).strip()
-                                goods_desc = cleaned_desc
-
-                        if goods_desc and boxes:
-                            # 규격(mm) 추출 로직 (예: 160X320 -> 1600 x 3200 mm)
-                            size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', goods_desc, re.IGNORECASE)
-                            if size_match:
-                                w_mm = int(size_match.group(1)) * 10
-                                l_mm = int(size_match.group(2)) * 10
-                                dimension_mm = f"{w_mm} x {l_mm} mm"
-                            else:
-                                dimension_mm = "규격 정보 없음"
-                                
-                            parsed_rows.append({
-                                "Packing N°": packing_no,
-                                "Dated": dated_str,
-                                "세라믹 원장명": goods_desc,
-                                "원장 수량(N Box)": int(boxes) if boxes.isdigit() else 0,
-                                "총 헤베(m²)": m2_val,
-                                "원장 규격(mm)": dimension_mm
-                            })
+                        # 품명 추출 (MARBLE, HERI, MATT 시작점부터 가져오기)
+                        desc_match = re.search(r'(MARBLE|HERI|MATT)', line)
+                        goods_desc = "품명 인식 불가"
+                        
+                        if desc_match:
+                            raw_desc = line[desc_match.start():]
+                            # 뒤에 붙은 품번/HS CODE (6자리 이상 연속된 숫자) 싹둑 자르기
+                            goods_desc = re.sub(r'\s*\b\d{6,}\b.*', '', raw_desc).strip()
+                        
+                        # 규격(mm) 추출 (예: 160X320 -> 1600 x 3200 mm)
+                        size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', goods_desc, re.IGNORECASE)
+                        dimension_mm = "규격 정보 없음"
+                        if size_match:
+                            w_mm = int(size_match.group(1)) * 10
+                            l_mm = int(size_match.group(2)) * 10
+                            dimension_mm = f"{w_mm} x {l_mm} mm"
                             
+                        parsed_rows.append({
+                            "Packing N°": packing_no,
+                            "Dated": dated_str,
+                            "세라믹 원장명": goods_desc,
+                            "원장 수량(N Box)": int(boxes),
+                            "총 헤베(m²)": m2_val,
+                            "원장 규격(mm)": dimension_mm
+                        })
+                        
     if parsed_rows:
         return pd.DataFrame(parsed_rows)
     else:
