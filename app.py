@@ -46,7 +46,7 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (특수문자 무시 슈퍼 패턴 적용) ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (줄바꿈 무시 완전체 로직) ---
 def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
@@ -65,41 +65,36 @@ def parse_florim_pdf(pdf_file, filename=""):
                 d_match = re.search(r'Dated\s*[:|]\s*([\d\.]+)', text, re.IGNORECASE)
                 if d_match: dated_str = d_match.group(1)
                 
-            lines = text.split('\n')
-            for line in lines:
-                # 텍스트에 섞인 막대기(|) 같은 불순물을 공백으로 싹 치환해뿌기
-                clean_line = line.replace('|', ' ')
+            # 핵심: 모든 줄바꿈과 막대기를 공백으로 치환해서 거대한 한 줄 텍스트로 만듦
+            clean_text = re.sub(r'[\n|]', ' ', text)
+            clean_text = re.sub(r'\s+', ' ', clean_text)
+            
+            # 정규식으로 전체 텍스트에서 패턴 찾기 (다중 매칭)
+            pattern = r'\b(\d+)\s+1\s+([\d,]+)\s*M2\s+(?:.*?)\s+((?:MARBLE|NATURE).*?)(?=\s+\d{6,})'
+            
+            for match in re.finditer(pattern, clean_text):
+                boxes = match.group(1)
+                m2_val = match.group(2).replace(',', '.')
+                desc = match.group(3).strip()
                 
-                # 'M2'가 포함되어 있으면 분석 시작
-                if 'M2' in clean_line:
-                    qty_match = re.search(r'\b(\d+)\s+1\s+([\d,]+)\s*M2', clean_line)
+                # 규격 추출
+                size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', desc, re.IGNORECASE)
+                dimension_mm = "규격 정보 없음"
+                if size_match:
+                    w_mm = int(size_match.group(1)) * 10
+                    l_mm = int(size_match.group(2)) * 10
+                    dimension_mm = f"{w_mm} x {l_mm} mm"
                     
-                    if qty_match:
-                        boxes = qty_match.group(1)
-                        m2_val = qty_match.group(2).replace(',', '.') 
-                        
-                        # 'M2' 이후의 텍스트에서 불필요한 정보(예: 1 Q50 5) 제거 후 품명 추출
-                        after_m2 = clean_line[clean_line.find('M2')+2:]
-                        desc = re.sub(r'^\s*\d+\s+[A-Z0-9]+\s*\d*\s*', '', after_m2)
-                        desc = re.sub(r'\b\d{6,}\b', '', desc).strip()
-                        
-                        size_match = re.search(r'(\d+)\s*[X\x88x]\s*(\d+)', desc, re.IGNORECASE)
-                        dimension_mm = "규격 정보 없음"
-                        if size_match:
-                            w_mm = int(size_match.group(1)) * 10
-                            l_mm = int(size_match.group(2)) * 10
-                            dimension_mm = f"{w_mm} x {l_mm} mm"
-                            
-                        parsed_rows.append({
-                            "업로드 파일명": filename,
-                            "Packing N°": packing_no,
-                            "Dated": dated_str,
-                            "세라믹 원장명": desc,
-                            "원장 수량(N Box)": int(boxes),
-                            "총 헤베(m²)": m2_val,
-                            "원장 규격(mm)": dimension_mm
-                        })
-                        
+                parsed_rows.append({
+                    "업로드 파일명": filename,
+                    "Packing N°": packing_no,
+                    "Dated": dated_str,
+                    "세라믹 원장명": desc,
+                    "원장 수량(N Box)": int(boxes),
+                    "총 헤베(m²)": m2_val,
+                    "원장 규격(mm)": dimension_mm
+                })
+                
     if parsed_rows:
         return pd.DataFrame(parsed_rows)
     else:
@@ -159,7 +154,7 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 📥 재고 입력 (P/L 자동 파싱 및 다중 파일 업로드 적용)
+    # 메뉴 2: 📥 재고 입력 
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 (P/L 업로드)")
@@ -167,12 +162,10 @@ def main():
         
         entry_date = st.date_input("입고 일자 선택", datetime.date.today())
         
-        # 다중 업로드 허용
         uploaded_files = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 지원)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
         
         if uploaded_files:
             all_dfs = []
-            
             for uploaded_file in uploaded_files:
                 df = None
                 if uploaded_file.name.endswith('.csv'):
@@ -180,7 +173,6 @@ def main():
                 elif uploaded_file.name.endswith(('.xlsx', '.xls')):
                     df = pd.read_excel(uploaded_file, engine='openpyxl')
                 elif uploaded_file.name.endswith('.pdf'):
-                    # 파일명까지 같이 넘기게 함수 수정
                     df = parse_florim_pdf(uploaded_file, uploaded_file.name)
                 
                 if df is not None:
@@ -197,7 +189,7 @@ def main():
                 if st.button("✅ 전체 재고 데이터 확정 및 DB 저장", type="primary"):
                     st.success(f"{entry_date} 일자로 총 {len(edited_df)}건의 원장 재고 데이터가 성공적으로 확정되었습니다.")
             else:
-                st.error("업로드하신 파일들에서 P/L 표 데이터를 인식하지 못했습니다. 표준 FLORIM P/L 양식인지 확인해 주십시오.")
+                st.error("업로드하신 파일들에서 P/L 표 데이터를 인식하지 못했습니다. 양식을 다시 확인해 주십시오.")
 
     # ==========================================
     # 메뉴 3: 🔄 재고 배분
