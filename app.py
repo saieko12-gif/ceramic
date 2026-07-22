@@ -24,7 +24,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 임시 메모리(session_state) 세팅 ---
+# --- 2. 🧠 임시 메모리(session_state) 세팅 ---
 if 'contractors_df' not in st.session_state:
     st.session_state.contractors_df = pd.DataFrame({
         "협력사명": ["(주)제일가공", "대한세라믹", "우성산업"],
@@ -46,7 +46,7 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (기존 자동 인식용) ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (Y좌표 기반 시각적 행 복원 무적 알고리즘) ---
 def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
@@ -55,9 +55,9 @@ def parse_florim_pdf(pdf_file, filename=""):
     try:
         with pdfplumber.open(pdf_file) as pdf:
             for page in pdf.pages:
-                text = page.extract_text()
-                if not text: continue
+                text = page.extract_text() or ""
                 
+                # 상단 Packing N° 및 Dated 추출
                 if not packing_no:
                     p_match = re.search(r'Packing\s*N[^\d]*(\d+)', text, re.IGNORECASE)
                     if p_match: packing_no = p_match.group(1)
@@ -65,41 +65,58 @@ def parse_florim_pdf(pdf_file, filename=""):
                     d_match = re.search(r'Dated[^\d]*([\d\.]+)', text, re.IGNORECASE)
                     if d_match: dated_str = d_match.group(1)
                     
-                clean_text = re.sub(r'[\r\n|]', ' ', text)
-                clean_text = re.sub(r'\s+', ' ', clean_text)
-                
-                pattern_m2 = r'\b(\d+)\s+[1lI]?\s*([\d,\.]+)\s*M2'
-                
-                for match in re.finditer(pattern_m2, clean_text, re.IGNORECASE):
-                    boxes = match.group(1)
-                    m2_val = match.group(2).replace(',', '.')
+                # Y좌표 기반 행 복원
+                words = page.extract_words()
+                if not words:
+                    continue
                     
-                    start_idx = match.end()
-                    search_area = clean_text[start_idx : start_idx + 150]
+                lines_dict = {}
+                for w in words:
+                    y_coord = round(w['top'] / 3) * 3
+                    if y_coord not in lines_dict:
+                        lines_dict[y_coord] = []
+                    lines_dict[y_coord].append(w)
                     
-                    start_word = re.search(r'[A-Za-z]{3,}', search_area)
-                    if start_word:
-                        desc_candidate = search_area[start_word.start():]
-                        desc = re.split(r'\s*\b\d{5,}\b', desc_candidate)[0].strip()
-                    else:
-                        desc = "품명 인식 불가"
+                for y in sorted(lines_dict.keys()):
+                    line_words = sorted(lines_dict[y], key=lambda x: x['x0'])
+                    line_text = " ".join([w['text'] for w in line_words])
+                    
+                    line_text = line_text.replace('|', ' ')
+                    line_text = re.sub(r'\s+', ' ', line_text)
+                    
+                    if 'M2' in line_text.upper():
+                        qty_match = re.search(r'\b(\d+)\s+[1lI]?\s*([\d,\.]+)\s*M2', line_text, re.IGNORECASE)
                         
-                    size_match = re.search(r'(\d+)\s*[Xx]\s*(\d+)', desc, re.IGNORECASE)
-                    dimension_mm = "규격 정보 없음"
-                    if size_match:
-                        w_mm = int(size_match.group(1)) * 10
-                        l_mm = int(size_match.group(2)) * 10
-                        dimension_mm = f"{w_mm} x {l_mm} mm"
-                        
-                    parsed_rows.append({
-                        "업로드 파일명": filename,
-                        "Packing N°": packing_no,
-                        "Dated": dated_str,
-                        "세라믹 원장명": desc,
-                        "원장 수량(N Box)": int(boxes),
-                        "총 헤베(m²)": m2_val,
-                        "원장 규격(mm)": dimension_mm
-                    })
+                        if qty_match:
+                            boxes = qty_match.group(1)
+                            m2_val = qty_match.group(2).replace(',', '.')
+                            
+                            start_idx = qty_match.end()
+                            search_area = line_text[start_idx:]
+                            
+                            start_word = re.search(r'[A-Za-z]{3,}', search_area)
+                            if start_word:
+                                desc_candidate = search_area[start_word.start():]
+                                desc = re.split(r'\s*\b\d{5,}\b', desc_candidate)[0].strip()
+                            else:
+                                desc = "품명 인식 불가"
+                                
+                            size_match = re.search(r'(\d+)\s*[Xx]\s*(\d+)', desc, re.IGNORECASE)
+                            dimension_mm = "규격 정보 없음"
+                            if size_match:
+                                w_mm = int(size_match.group(1)) * 10
+                                l_mm = int(size_match.group(2)) * 10
+                                dimension_mm = f"{w_mm} x {l_mm} mm"
+                                
+                            parsed_rows.append({
+                                "업로드 파일명": filename,
+                                "Packing N°": packing_no,
+                                "Dated": dated_str,
+                                "세라믹 원장명": desc,
+                                "원장 수량(N Box)": int(boxes),
+                                "총 헤베(m²)": m2_val,
+                                "원장 규격(mm)": dimension_mm
+                            })
     except Exception as e:
         return None
         
@@ -107,19 +124,6 @@ def parse_florim_pdf(pdf_file, filename=""):
         return pd.DataFrame(parsed_rows)
     else:
         return None
-
-# --- ★ 신규 추가: PDF 쌩 텍스트를 엑셀로 강제 변환하는 함수 ★ ---
-def convert_pdf_to_raw_excel(pdf_file):
-    rows = []
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                for line in text.split('\n'):
-                    # 띄어쓰기 2칸 이상을 기준으로 엑셀의 열(Column)을 나눔
-                    cols = re.split(r'\s{2,}', line.strip())
-                    rows.append(cols)
-    return pd.DataFrame(rows)
 
 # --- 4. 권한 및 메뉴 시스템 ---
 st.sidebar.title("🔐 시스템 로그인")
@@ -139,7 +143,7 @@ def main():
                                 ["대시보드", "가공 및 시공 입력", "현장 투입 내역"])
 
     # ==========================================
-    # 메뉴 1: 대시보드
+    # 메뉴 1: 📊 대시보드
     # ==========================================
     if menu == "대시보드":
         st.title("📊 통합 자재 및 프로젝트 대시보드")
@@ -175,32 +179,36 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 재고 입력 (PDF 변환기 추가)
+    # 메뉴 2: 📥 재고 입력 (깔끔한 엑셀 변환기 적용)
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 및 P/L 업로드")
         
-        # --- PDF to Excel 강제 변환기 영역 ---
-        with st.expander("🛠️ [보조 도구] 인식이 잘 안되는 꼬인 PDF 엑셀로 변환하기", expanded=True):
-            st.info("자동 인식이 안 되는 특이한 양식의 PDF 파일은 여기서 먼저 엑셀로 추출하십시오. 엑셀에서 데이터를 다듬은 후 아래에 업로드하면 확실합니다.")
-            raw_pdf = st.file_uploader("변환할 PDF 파일 선택", type=["pdf"], key="raw_pdf")
+        # --- PDF to Excel 강제 변환기 (무적 파싱 로직 적용) ---
+        with st.expander("🛠️ [보조 도구] 인식이 잘 안되는 꼬인 PDF 깔끔하게 엑셀로 추출하기", expanded=True):
+            st.info("특이한 양식의 PDF는 여기서 엑셀로 추출하십시오. 쓰레기 데이터를 걸러내고 완벽하게 정제된 표만 엑셀로 만들어 줍니다.")
+            raw_pdf = st.file_uploader("변환할 PDF 파일 하나를 올려보소", type=["pdf"], key="raw_pdf")
             if raw_pdf:
-                if st.button("🔄 엑셀로 추출하기"):
-                    with st.spinner("엑셀로 변환 중입니다..."):
-                        df_raw = convert_pdf_to_raw_excel(raw_pdf)
+                if st.button("🔄 엑셀로 깔끔하게 추출하기"):
+                    with st.spinner("불필요한 데이터 제거 및 엑셀 변환 중입니다..."):
+                        # 무식하게 쌩 텍스트를 뽑는 게 아니라 정제 로직을 태워서 엑셀로 뱉어냄
+                        df_clean = parse_florim_pdf(raw_pdf, raw_pdf.name)
                         
-                        output_raw = io.BytesIO()
-                        with pd.ExcelWriter(output_raw, engine='openpyxl') as writer:
-                            df_raw.to_excel(writer, index=False, header=False)
-                        raw_excel_data = output_raw.getvalue()
-                        
-                        st.download_button(
-                            label=f"📥 [{raw_pdf.name}] 엑셀로 다운로드",
-                            data=raw_excel_data,
-                            file_name=f"변환됨_{raw_pdf.name}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            type="primary"
-                        )
+                        if df_clean is not None and not df_clean.empty:
+                            output_raw = io.BytesIO()
+                            with pd.ExcelWriter(output_raw, engine='openpyxl') as writer:
+                                df_clean.to_excel(writer, index=False)
+                            raw_excel_data = output_raw.getvalue()
+                            
+                            st.download_button(
+                                label=f"📥 [{raw_pdf.name}] 깔끔한 엑셀로 다운로드",
+                                data=raw_excel_data,
+                                file_name=f"정제됨_{raw_pdf.name}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                type="primary"
+                            )
+                        else:
+                            st.error("데이터를 추출할 수 없습니다. 양식을 확인해주세요.")
         
         st.divider()
         
@@ -208,7 +216,7 @@ def main():
         st.subheader("📦 메인 재고 업로드 (엑셀 / 자동인식 PDF)")
         entry_date = st.date_input("입고 일자 선택", datetime.date.today())
         
-        uploaded_files = st.file_uploader("최종 파일 다중 업로드 (.xlsx, .csv, 정상 양식 .pdf)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
+        uploaded_files = st.file_uploader("최종 파일 다중 업로드 (.xlsx, .csv, 정상 양식 .pdf 지원)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
         
         if uploaded_files:
             all_dfs = []
@@ -238,7 +246,7 @@ def main():
                 st.error("업로드하신 파일들에서 데이터를 인식하지 못했습니다. 보조 도구를 이용해 엑셀로 변환해 주십시오.")
 
     # ==========================================
-    # 메뉴 3: 재고 배분
+    # 메뉴 3: 🔄 재고 배분
     # ==========================================
     elif menu == "재고 배분":
         st.title("🔄 재고 배분 및 현장 매핑")
@@ -269,7 +277,7 @@ def main():
             st.success("배분 내역 수정이 완료되었습니다.")
 
     # ==========================================
-    # 메뉴 4: 가공 및 시공 입력
+    # 메뉴 4: 🛠️ 가공 및 시공 입력
     # ==========================================
     elif menu == "가공 및 시공 입력":
         st.title("🛠️ 가공 내역 등록")
@@ -299,7 +307,7 @@ def main():
             st.success("수정된 가공 내역이 시스템에 반영되었습니다.")
 
     # ==========================================
-    # 메뉴 5: 현장 투입 내역
+    # 메뉴 5: 🏗️ 현장 투입 내역
     # ==========================================
     elif menu == "현장 투입 내역":
         st.title("🏗️ 현장 투입 내역 등록")
@@ -329,7 +337,7 @@ def main():
             st.success("수정된 현장 투입 내역이 시스템에 반영되었습니다.")
 
     # ==========================================
-    # 메뉴 6: 기준정보 관리
+    # 메뉴 6: ⚙️ 기준정보 관리
     # ==========================================
     elif menu == "기준정보 관리":
         st.title("⚙️ 기준정보 및 계정 관리 (마스터 데이터)")
