@@ -46,89 +46,80 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (Y좌표 기반 시각적 행 복원 무적 알고리즘) ---
+# --- 3. FLORIM P/L PDF 파싱 함수 (기존 자동 인식용) ---
 def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
     parsed_rows = []
     
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            # 1. 문서 상단의 패킹번호와 날짜 추출 (기존 텍스트 방식)
-            text = page.extract_text() or ""
-            if not packing_no:
-                p_match = re.search(r'Packing\s*N[^\d]*(\d+)', text, re.IGNORECASE)
-                if p_match: packing_no = p_match.group(1)
-            if not dated_str:
-                d_match = re.search(r'Dated[^\d]*([\d\.]+)', text, re.IGNORECASE)
-                if d_match: dated_str = d_match.group(1)
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if not text: continue
                 
-            # 2. ★ 핵심: 글자들의 Y좌표를 추출해서 눈에 보이는 '가로줄'을 강제 복원 ★
-            words = page.extract_words()
-            if not words:
-                continue
-                
-            lines_dict = {}
-            for w in words:
-                # 글자의 Y좌표(높이)를 3픽셀 단위로 묶어서 동일한 행으로 간주
-                y_coord = round(w['top'] / 3) * 3
-                if y_coord not in lines_dict:
-                    lines_dict[y_coord] = []
-                lines_dict[y_coord].append(w)
-                
-            # 위에서 아래로(Y좌표), 좌에서 우로(X좌표) 정렬하여 완벽한 줄(Line) 생성
-            for y in sorted(lines_dict.keys()):
-                line_words = sorted(lines_dict[y], key=lambda x: x['x0'])
-                line_text = " ".join([w['text'] for w in line_words])
-                
-                # 불순물(|) 제거 및 띄어쓰기 정리
-                line_text = line_text.replace('|', ' ')
-                line_text = re.sub(r'\s+', ' ', line_text)
-                
-                # 'M2'가 포함된 가로줄만 집중 분석
-                if 'M2' in line_text.upper():
-                    # 수량 1 헤베 M2 패턴 완벽 매칭
-                    qty_match = re.search(r'\b(\d+)\s+[1lI]?\s*([\d,\.]+)\s*M2', line_text, re.IGNORECASE)
+                if not packing_no:
+                    p_match = re.search(r'Packing\s*N[^\d]*(\d+)', text, re.IGNORECASE)
+                    if p_match: packing_no = p_match.group(1)
+                if not dated_str:
+                    d_match = re.search(r'Dated[^\d]*([\d\.]+)', text, re.IGNORECASE)
+                    if d_match: dated_str = d_match.group(1)
                     
-                    if qty_match:
-                        boxes = qty_match.group(1)
-                        m2_val = qty_match.group(2).replace(',', '.')
+                clean_text = re.sub(r'[\r\n|]', ' ', text)
+                clean_text = re.sub(r'\s+', ' ', clean_text)
+                
+                pattern_m2 = r'\b(\d+)\s+[1lI]?\s*([\d,\.]+)\s*M2'
+                
+                for match in re.finditer(pattern_m2, clean_text, re.IGNORECASE):
+                    boxes = match.group(1)
+                    m2_val = match.group(2).replace(',', '.')
+                    
+                    start_idx = match.end()
+                    search_area = clean_text[start_idx : start_idx + 150]
+                    
+                    start_word = re.search(r'[A-Za-z]{3,}', search_area)
+                    if start_word:
+                        desc_candidate = search_area[start_word.start():]
+                        desc = re.split(r'\s*\b\d{5,}\b', desc_candidate)[0].strip()
+                    else:
+                        desc = "품명 인식 불가"
                         
-                        # M2 위치 이후 텍스트에서 품명 추출
-                        start_idx = qty_match.end()
-                        search_area = line_text[start_idx:]
+                    size_match = re.search(r'(\d+)\s*[Xx]\s*(\d+)', desc, re.IGNORECASE)
+                    dimension_mm = "규격 정보 없음"
+                    if size_match:
+                        w_mm = int(size_match.group(1)) * 10
+                        l_mm = int(size_match.group(2)) * 10
+                        dimension_mm = f"{w_mm} x {l_mm} mm"
                         
-                        # 영문자 3자 이상(MARBLE 등) 찾기
-                        start_word = re.search(r'[A-Za-z]{3,}', search_area)
-                        if start_word:
-                            desc_candidate = search_area[start_word.start():]
-                            # 5자리 이상 연속된 숫자(HS CODE 등) 앞까지만 긁어옴
-                            desc = re.split(r'\s*\b\d{5,}\b', desc_candidate)[0].strip()
-                        else:
-                            desc = "품명 인식 불가"
-                            
-                        # 규격(mm) 추출
-                        size_match = re.search(r'(\d+)\s*[Xx]\s*(\d+)', desc, re.IGNORECASE)
-                        dimension_mm = "규격 정보 없음"
-                        if size_match:
-                            w_mm = int(size_match.group(1)) * 10
-                            l_mm = int(size_match.group(2)) * 10
-                            dimension_mm = f"{w_mm} x {l_mm} mm"
-                            
-                        parsed_rows.append({
-                            "업로드 파일명": filename,
-                            "Packing N°": packing_no,
-                            "Dated": dated_str,
-                            "세라믹 원장명": desc,
-                            "원장 수량(N Box)": int(boxes),
-                            "총 헤베(m²)": m2_val,
-                            "원장 규격(mm)": dimension_mm
-                        })
-                        
+                    parsed_rows.append({
+                        "업로드 파일명": filename,
+                        "Packing N°": packing_no,
+                        "Dated": dated_str,
+                        "세라믹 원장명": desc,
+                        "원장 수량(N Box)": int(boxes),
+                        "총 헤베(m²)": m2_val,
+                        "원장 규격(mm)": dimension_mm
+                    })
+    except Exception as e:
+        return None
+        
     if parsed_rows:
         return pd.DataFrame(parsed_rows)
     else:
         return None
+
+# --- ★ 신규 추가: PDF 쌩 텍스트를 엑셀로 강제 변환하는 함수 ★ ---
+def convert_pdf_to_raw_excel(pdf_file):
+    rows = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                for line in text.split('\n'):
+                    # 띄어쓰기 2칸 이상을 기준으로 엑셀의 열(Column)을 나눔
+                    cols = re.split(r'\s{2,}', line.strip())
+                    rows.append(cols)
+    return pd.DataFrame(rows)
 
 # --- 4. 권한 및 메뉴 시스템 ---
 st.sidebar.title("🔐 시스템 로그인")
@@ -184,15 +175,40 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 재고 입력 (다중 파일 무적 로직)
+    # 메뉴 2: 재고 입력 (PDF 변환기 추가)
     # ==========================================
     elif menu == "재고 입력":
-        st.title("📥 재고 입고 등록 (P/L 업로드)")
-        st.info("수입된 P/L(Packing List)을 업로드하여 원장 재고를 시스템에 등록합니다. 다중 파일 업로드가 가능합니다.")
+        st.title("📥 재고 입고 등록 및 P/L 업로드")
         
+        # --- PDF to Excel 강제 변환기 영역 ---
+        with st.expander("🛠️ [보조 도구] 인식이 잘 안되는 꼬인 PDF 엑셀로 변환하기", expanded=True):
+            st.info("자동 인식이 안 되는 특이한 양식의 PDF 파일은 여기서 먼저 엑셀로 추출하십시오. 엑셀에서 데이터를 다듬은 후 아래에 업로드하면 확실합니다.")
+            raw_pdf = st.file_uploader("변환할 PDF 파일 선택", type=["pdf"], key="raw_pdf")
+            if raw_pdf:
+                if st.button("🔄 엑셀로 추출하기"):
+                    with st.spinner("엑셀로 변환 중입니다..."):
+                        df_raw = convert_pdf_to_raw_excel(raw_pdf)
+                        
+                        output_raw = io.BytesIO()
+                        with pd.ExcelWriter(output_raw, engine='openpyxl') as writer:
+                            df_raw.to_excel(writer, index=False, header=False)
+                        raw_excel_data = output_raw.getvalue()
+                        
+                        st.download_button(
+                            label=f"📥 [{raw_pdf.name}] 엑셀로 다운로드",
+                            data=raw_excel_data,
+                            file_name=f"변환됨_{raw_pdf.name}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary"
+                        )
+        
+        st.divider()
+        
+        # --- 메인 재고 업로드 영역 ---
+        st.subheader("📦 메인 재고 업로드 (엑셀 / 자동인식 PDF)")
         entry_date = st.date_input("입고 일자 선택", datetime.date.today())
         
-        uploaded_files = st.file_uploader("파일 업로드 (.xlsx, .csv, .pdf 지원)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
+        uploaded_files = st.file_uploader("최종 파일 다중 업로드 (.xlsx, .csv, 정상 양식 .pdf)", type=["xlsx", "csv", "pdf"], accept_multiple_files=True)
         
         if uploaded_files:
             all_dfs = []
@@ -210,8 +226,8 @@ def main():
             
             if all_dfs:
                 final_df = pd.concat(all_dfs, ignore_index=True)
-                st.subheader("👀 P/L 다중 자동 인식 결과 미리보기 및 수정")
-                st.markdown("파싱된 데이터를 확인하고 필요시 셀을 **더블클릭**하여 직접 수정하십시오.")
+                st.subheader("👀 데이터 미리보기 및 수정")
+                st.markdown("데이터를 확인하고 필요시 표 안의 셀을 **더블클릭**하여 직접 수정하십시오.")
                 
                 edited_df = st.data_editor(final_df, use_container_width=True, num_rows="dynamic", key="pl_editor")
                 
@@ -219,7 +235,7 @@ def main():
                 if st.button("✅ 전체 재고 데이터 확정 및 DB 저장", type="primary"):
                     st.success(f"{entry_date} 일자로 총 {len(edited_df)}건의 원장 재고 데이터가 성공적으로 확정되었습니다.")
             else:
-                st.error("업로드하신 파일들에서 P/L 표 데이터를 인식하지 못했습니다. 양식을 다시 확인해 주십시오.")
+                st.error("업로드하신 파일들에서 데이터를 인식하지 못했습니다. 보조 도구를 이용해 엑셀로 변환해 주십시오.")
 
     # ==========================================
     # 메뉴 3: 재고 배분
