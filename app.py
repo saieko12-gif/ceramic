@@ -46,21 +46,24 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- ★ 신규 추가: PDF 쌩 텍스트를 엑셀로 강제 변환하는 함수 (무식하게 다 뽑음) ★ ---
+# --- ★ 신규 추가: PDF 쌩 텍스트를 엑셀 A열에 몰빵하는 절대 무적 함수 ★ ---
 def convert_pdf_to_raw_excel(pdf_file):
     rows = []
     try:
         with pdfplumber.open(pdf_file) as pdf:
             for page in pdf.pages:
-                text = page.extract_text(x_tolerance=3, y_tolerance=10)
+                text = page.extract_text()
                 if text:
                     for line in text.split('\n'):
-                        # 띄어쓰기 2칸 이상을 기준으로 엑셀의 열(Column)을 나눔
-                        cols = re.split(r'\s{2,}', line.strip())
-                        rows.append(cols)
+                        # 띄어쓰기 무시! 그냥 한 줄을 통째로 하나의 리스트 요소로 넣음 (엑셀 A열에 들어감)
+                        clean_line = line.strip().replace('|', ' ')
+                        if clean_line:
+                            rows.append([clean_line])
     except Exception as e:
         pass
-    return pd.DataFrame(rows)
+    
+    # 컬럼 이름을 임의로 하나 주어서 에러 방지
+    return pd.DataFrame(rows, columns=["추출된 텍스트 원본"])
 
 # --- 3. FLORIM P/L PDF 메인 파싱 함수 (Y좌표 오차 대폭 허용 및 순서 무관 알고리즘) ---
 def parse_florim_pdf(pdf_file, filename=""):
@@ -205,13 +208,13 @@ def main():
             if raw_pdf:
                 if st.button("🔄 엑셀로 추출하기"):
                     with st.spinner("엑셀 변환 중입니다..."):
-                        # 무식하고 확실한 쌩 텍스트 추출 방식 사용
+                        # 무식하고 확실한 쌩 텍스트 추출 방식 사용 (A열 몰빵)
                         df_raw = convert_pdf_to_raw_excel(raw_pdf)
                         
                         if df_raw is not None and not df_raw.empty:
                             output_raw = io.BytesIO()
                             with pd.ExcelWriter(output_raw, engine='openpyxl') as writer:
-                                df_raw.to_excel(writer, index=False, header=False)
+                                df_raw.to_excel(writer, index=False, header=True)
                             raw_excel_data = output_raw.getvalue()
                             
                             st.download_button(
