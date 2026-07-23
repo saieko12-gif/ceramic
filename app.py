@@ -55,14 +55,13 @@ def convert_pdf_to_raw_excel(pdf_file):
                 text = page.extract_text()
                 if text:
                     for line in text.split('\n'):
-                        # 띄어쓰기 무시! 그냥 한 줄을 통째로 하나의 리스트 요소로 넣음 (엑셀 A열에 들어감)
+                        # 띄어쓰기 무시! 그냥 한 줄을 통째로 하나의 리스트 요소로 넣음
                         clean_line = line.strip().replace('|', ' ')
                         if clean_line:
                             rows.append([clean_line])
     except Exception as e:
         pass
     
-    # 컬럼 이름을 임의로 하나 주어서 에러 방지
     return pd.DataFrame(rows, columns=["추출된 텍스트 원본"])
 
 # --- 3. FLORIM P/L PDF 메인 파싱 함수 (Y좌표 오차 대폭 허용 및 순서 무관 알고리즘) ---
@@ -196,31 +195,38 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 재고 입력 
+    # 메뉴 2: 재고 입력 (다중 엑셀 변환기 적용)
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 및 P/L 업로드")
         
-        # --- PDF to Excel 보조 도구 (접어두기 기본 설정 적용 및 멘트 수정) ---
+        # --- PDF to Excel 보조 도구 (다중 업로드 적용) ---
         with st.expander("🛠️ [보조 도구] PDF 자동 인식 실패 시 엑셀 변환기", expanded=False):
             st.info("PDF 자동 인식이 실패할 경우, 여기서 먼저 엑셀 파일로 추출(변환)한 뒤 메인 업로더에 첨부해 주십시오.")
-            raw_pdf = st.file_uploader("변환할 PDF 파일을 선택해 주십시오.", type=["pdf"], key="raw_pdf")
-            if raw_pdf:
+            raw_pdfs = st.file_uploader("변환할 PDF 파일을 선택해 주십시오. (다중 선택 가능)", type=["pdf"], key="raw_pdf", accept_multiple_files=True)
+            
+            if raw_pdfs:
                 if st.button("🔄 엑셀로 추출하기"):
                     with st.spinner("엑셀 변환 중입니다..."):
-                        # 무식하고 확실한 쌩 텍스트 추출 방식 사용 (A열 몰빵)
-                        df_raw = convert_pdf_to_raw_excel(raw_pdf)
+                        all_raw_dfs = []
+                        for raw_pdf in raw_pdfs:
+                            df_raw = convert_pdf_to_raw_excel(raw_pdf)
+                            if df_raw is not None and not df_raw.empty:
+                                # 파일명을 맨 앞에 추가해서 어떤 파일에서 온 건지 구분하게 해줌
+                                df_raw.insert(0, "파일명", raw_pdf.name)
+                                all_raw_dfs.append(df_raw)
                         
-                        if df_raw is not None and not df_raw.empty:
+                        if all_raw_dfs:
+                            final_raw_df = pd.concat(all_raw_dfs, ignore_index=True)
                             output_raw = io.BytesIO()
                             with pd.ExcelWriter(output_raw, engine='openpyxl') as writer:
-                                df_raw.to_excel(writer, index=False, header=True)
+                                final_raw_df.to_excel(writer, index=False, header=True)
                             raw_excel_data = output_raw.getvalue()
                             
                             st.download_button(
-                                label=f"📥 [{raw_pdf.name}] 엑셀로 다운로드",
+                                label=f"📥 총 {len(raw_pdfs)}개 파일 엑셀로 한 번에 다운로드",
                                 data=raw_excel_data,
-                                file_name=f"변환됨_{raw_pdf.name}.xlsx",
+                                file_name=f"다중변환됨_{datetime.date.today()}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 type="primary"
                             )
