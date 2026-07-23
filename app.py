@@ -46,7 +46,23 @@ if 'proc_history' not in st.session_state:
 if 'site_history' not in st.session_state:
     st.session_state.site_history = pd.DataFrame(columns=["투입 일자", "담당 협력사", "시공 현장", "투입 원장 종류", "시공 완료 면적(m²)"])
 
-# --- 3. FLORIM P/L PDF 파싱 함수 (Y좌표 기반 시각적 행 복원 무적 알고리즘) ---
+# --- ★ 신규 추가: PDF 쌩 텍스트를 엑셀로 강제 변환하는 함수 (무식하게 다 뽑음) ★ ---
+def convert_pdf_to_raw_excel(pdf_file):
+    rows = []
+    try:
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text(x_tolerance=3, y_tolerance=10)
+                if text:
+                    for line in text.split('\n'):
+                        # 띄어쓰기 2칸 이상을 기준으로 엑셀의 열(Column)을 나눔
+                        cols = re.split(r'\s{2,}', line.strip())
+                        rows.append(cols)
+    except Exception as e:
+        pass
+    return pd.DataFrame(rows)
+
+# --- 3. FLORIM P/L PDF 메인 파싱 함수 (Y좌표 오차 대폭 허용 및 순서 무관 알고리즘) ---
 def parse_florim_pdf(pdf_file, filename=""):
     packing_no = ""
     dated_str = ""
@@ -65,14 +81,14 @@ def parse_florim_pdf(pdf_file, filename=""):
                     d_match = re.search(r'Dated[^\d]*([\d\.]+)', text, re.IGNORECASE)
                     if d_match: dated_str = d_match.group(1)
                     
-                # Y좌표 기반 행 복원
+                # Y좌표 기반 행 복원 (오차 범위를 10픽셀로 대폭 확대하여 찢어진 줄 방어)
                 words = page.extract_words()
                 if not words:
                     continue
                     
                 lines_dict = {}
                 for w in words:
-                    y_coord = round(w['top'] / 3) * 3
+                    y_coord = round(w['top'] / 10) * 10
                     if y_coord not in lines_dict:
                         lines_dict[y_coord] = []
                     lines_dict[y_coord].append(w)
@@ -91,14 +107,12 @@ def parse_florim_pdf(pdf_file, filename=""):
                             boxes = qty_match.group(1)
                             m2_val = qty_match.group(2).replace(',', '.')
                             
-                            start_idx = qty_match.end()
-                            search_area = line_text[start_idx:]
+                            # M2 뒷부분 텍스트에서 품번(5자리 이상 숫자) 싹 날리고 품명만 남기기
+                            search_area = line_text[qty_match.end():].strip()
+                            desc = re.sub(r'\b\d{5,}\b', '', search_area).strip()
+                            desc = re.sub(r'\s{2,}', ' ', desc)
                             
-                            start_word = re.search(r'[A-Za-z]{3,}', search_area)
-                            if start_word:
-                                desc_candidate = search_area[start_word.start():]
-                                desc = re.split(r'\s*\b\d{5,}\b', desc_candidate)[0].strip()
-                            else:
+                            if len(desc) < 3:
                                 desc = "품명 인식 불가"
                                 
                             size_match = re.search(r'(\d+)\s*[Xx]\s*(\d+)', desc, re.IGNORECASE)
@@ -143,7 +157,7 @@ def main():
                                 ["대시보드", "가공 및 시공 입력", "현장 투입 내역"])
 
     # ==========================================
-    # 메뉴 1: 📊 대시보드
+    # 메뉴 1: 대시보드
     # ==========================================
     if menu == "대시보드":
         st.title("📊 통합 자재 및 프로젝트 대시보드")
@@ -179,30 +193,31 @@ def main():
             st.info("현재 등록된 투입 내역이 없습니다.")
 
     # ==========================================
-    # 메뉴 2: 📥 재고 입력 (UI 깔끔하게 개선)
+    # 메뉴 2: 재고 입력 
     # ==========================================
     elif menu == "재고 입력":
         st.title("📥 재고 입고 등록 및 P/L 업로드")
         
-        # --- PDF to Excel 보조 도구 (접어두기 기본 설정 적용) ---
-        with st.expander("🛠️ [보조 도구] PDF 파일 자동 인식 실패 시 엑셀 변환기", expanded=False):
-            st.info("PDF 원본 파일이 자동 인식되지 않는 경우, 본 도구를 이용해 엑셀 파일로 변환한 후 메인 업로더에 첨부해 주십시오.")
+        # --- PDF to Excel 보조 도구 (접어두기 기본 설정 적용 및 멘트 수정) ---
+        with st.expander("🛠️ [보조 도구] PDF 자동 인식 실패 시 엑셀 변환기", expanded=False):
+            st.info("PDF 자동 인식이 실패할 경우, 여기서 먼저 엑셀 파일로 추출(변환)한 뒤 메인 업로더에 첨부해 주십시오.")
             raw_pdf = st.file_uploader("변환할 PDF 파일을 선택해 주십시오.", type=["pdf"], key="raw_pdf")
             if raw_pdf:
                 if st.button("🔄 엑셀로 추출하기"):
-                    with st.spinner("데이터 정제 및 엑셀 변환 중입니다..."):
-                        df_clean = parse_florim_pdf(raw_pdf, raw_pdf.name)
+                    with st.spinner("엑셀 변환 중입니다..."):
+                        # 무식하고 확실한 쌩 텍스트 추출 방식 사용
+                        df_raw = convert_pdf_to_raw_excel(raw_pdf)
                         
-                        if df_clean is not None and not df_clean.empty:
+                        if df_raw is not None and not df_raw.empty:
                             output_raw = io.BytesIO()
                             with pd.ExcelWriter(output_raw, engine='openpyxl') as writer:
-                                df_clean.to_excel(writer, index=False)
+                                df_raw.to_excel(writer, index=False, header=False)
                             raw_excel_data = output_raw.getvalue()
                             
                             st.download_button(
                                 label=f"📥 [{raw_pdf.name}] 엑셀로 다운로드",
                                 data=raw_excel_data,
-                                file_name=f"정제됨_{raw_pdf.name}.xlsx",
+                                file_name=f"변환됨_{raw_pdf.name}.xlsx",
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 type="primary"
                             )
@@ -245,7 +260,7 @@ def main():
                 st.error("업로드하신 파일들에서 데이터를 인식하지 못했습니다. 보조 도구를 이용해 엑셀로 변환해 주십시오.")
 
     # ==========================================
-    # 메뉴 3: 🔄 재고 배분
+    # 메뉴 3: 재고 배분
     # ==========================================
     elif menu == "재고 배분":
         st.title("🔄 재고 배분 및 현장 매핑")
@@ -276,7 +291,7 @@ def main():
             st.success("배분 내역 수정이 완료되었습니다.")
 
     # ==========================================
-    # 메뉴 4: 🛠️ 가공 및 시공 입력
+    # 메뉴 4: 가공 및 시공 입력
     # ==========================================
     elif menu == "가공 및 시공 입력":
         st.title("🛠️ 가공 내역 등록")
@@ -306,7 +321,7 @@ def main():
             st.success("수정된 가공 내역이 시스템에 반영되었습니다.")
 
     # ==========================================
-    # 메뉴 5: 🏗️ 현장 투입 내역
+    # 메뉴 5: 현장 투입 내역
     # ==========================================
     elif menu == "현장 투입 내역":
         st.title("🏗️ 현장 투입 내역 등록")
@@ -336,7 +351,7 @@ def main():
             st.success("수정된 현장 투입 내역이 시스템에 반영되었습니다.")
 
     # ==========================================
-    # 메뉴 6: ⚙️ 기준정보 관리
+    # 메뉴 6: 기준정보 관리
     # ==========================================
     elif menu == "기준정보 관리":
         st.title("⚙️ 기준정보 및 계정 관리 (마스터 데이터)")
